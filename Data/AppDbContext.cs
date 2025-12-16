@@ -69,7 +69,7 @@ namespace Gallery.Data
                 entity.HasOne(l => l.User)
                       .WithMany(u => u.Likes)
                       .HasForeignKey(l => l.UserId)
-                      .OnDelete(DeleteBehavior.Cascade);
+                      .OnDelete(DeleteBehavior.NoAction);
                 
                 entity.HasOne(l => l.Post)
                       .WithMany(p => p.Likes)
@@ -85,7 +85,7 @@ namespace Gallery.Data
                 entity.HasOne(s => s.User)
                       .WithMany(u => u.Saves)
                       .HasForeignKey(s => s.UserId)
-                      .OnDelete(DeleteBehavior.Cascade);
+                      .OnDelete(DeleteBehavior.NoAction);
                 
                 entity.HasOne(s => s.Post)
                       .WithMany(p => p.Saves)
@@ -114,7 +114,7 @@ namespace Gallery.Data
                 entity.HasOne(c => c.User)
                       .WithMany(u => u.Comments)
                       .HasForeignKey(c => c.UserId)
-                      .OnDelete(DeleteBehavior.Cascade);
+                      .OnDelete(DeleteBehavior.NoAction);
                 
                 entity.HasOne(c => c.Post)
                       .WithMany(p => p.Comments)

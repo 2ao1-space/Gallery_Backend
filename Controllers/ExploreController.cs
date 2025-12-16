@@ -7,7 +7,7 @@ using System.Security.Claims;
 namespace Gallery.Controllers
 {
     [ApiController]
-    [Route("api/[controller]")]
+    [Route("[controller]")]
     public class ExploreController : ControllerBase
     {
         private readonly AppDbContext _context;

@@ -265,9 +265,6 @@ namespace GBackend.Migrations
                     b.Property<int>("AccessFailedCount")
                         .HasColumnType("int");
 
-                    b.Property<string>("BehanceAccessToken")
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<string>("BehanceId")
                         .HasColumnType("nvarchar(450)");
 
@@ -546,7 +543,7 @@ namespace GBackend.Migrations
                     b.HasOne("Gallery.Models.Entities.User", "User")
                         .WithMany("Comments")
                         .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.NoAction)
                         .IsRequired();
 
                     b.Navigation("Post");
@@ -584,7 +581,7 @@ namespace GBackend.Migrations
                     b.HasOne("Gallery.Models.Entities.User", "User")
                         .WithMany("Likes")
                         .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.NoAction)
                         .IsRequired();
 
                     b.Navigation("Post");
@@ -614,7 +611,7 @@ namespace GBackend.Migrations
                     b.HasOne("Gallery.Models.Entities.User", "User")
                         .WithMany("Saves")
                         .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.NoAction)
                         .IsRequired();
 
                     b.Navigation("Post");

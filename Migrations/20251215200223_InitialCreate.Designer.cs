@@ -12,8 +12,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace GBackend.Migrations
 {
     [DbContext(typeof(AppDbContext))]
-    [Migration("20251215012356_secondStep2")]
-    partial class secondStep2
+    [Migration("20251215200223_InitialCreate")]
+    partial class InitialCreate
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -267,9 +267,6 @@ namespace GBackend.Migrations
 
                     b.Property<int>("AccessFailedCount")
                         .HasColumnType("int");
-
-                    b.Property<string>("BehanceAccessToken")
-                        .HasColumnType("nvarchar(max)");
 
                     b.Property<string>("BehanceId")
                         .HasColumnType("nvarchar(450)");
@@ -549,7 +546,7 @@ namespace GBackend.Migrations
                     b.HasOne("Gallery.Models.Entities.User", "User")
                         .WithMany("Comments")
                         .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.NoAction)
                         .IsRequired();
 
                     b.Navigation("Post");
@@ -587,7 +584,7 @@ namespace GBackend.Migrations
                     b.HasOne("Gallery.Models.Entities.User", "User")
                         .WithMany("Likes")
                         .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.NoAction)
                         .IsRequired();
 
                     b.Navigation("Post");
@@ -617,7 +614,7 @@ namespace GBackend.Migrations
                     b.HasOne("Gallery.Models.Entities.User", "User")
                         .WithMany("Saves")
                         .HasForeignKey("UserId")
-                        .OnDelete(DeleteBehavior.Cascade)
+                        .OnDelete(DeleteBehavior.NoAction)
                         .IsRequired();
 
                     b.Navigation("Post");
