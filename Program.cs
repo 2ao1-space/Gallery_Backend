@@ -1,58 +1,92 @@
 using Microsoft.AspNetCore.Authentication.JwtBearer;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
-using System.Text;
-using Gallery.Data;
-using Gallery.Models.Entities;
-using Gallery.Services;
-using Gallery.Middleware;
-using Microsoft.AspNetCore.RateLimiting;
-using Serilog;
-using DotNetEnv;
 using Microsoft.OpenApi.Models;
-using System.Threading.RateLimiting;
-
-try
-{
-    Env.Load();
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"Could not load .env file: {ex.Message}");
-}
+using Gallery.Data;
+using Gallery.Middleware;
+using Gallery.Services;
+using System.Text;
 
 var builder = WebApplication.CreateBuilder(args);
 
-var dbServer = Environment.GetEnvironmentVariable("DB_SERVER");
-var dbName = Environment.GetEnvironmentVariable("DB_NAME");
-var dbUser = Environment.GetEnvironmentVariable("DB_USER");
-var dbPassword = Environment.GetEnvironmentVariable("DB_PASSWORD");
+// Load environment variables
+DotNetEnv.Env.Load();
 
+// Database
+var connectionString = Environment.GetEnvironmentVariable("DB_CONNECTION_STRING") 
+    ?? builder.Configuration.GetConnectionString("DefaultConnection");
 
-var connectionString = string.IsNullOrEmpty(dbServer) || string.IsNullOrEmpty(dbName) || 
-                       string.IsNullOrEmpty(dbUser) || string.IsNullOrEmpty(dbPassword)
-    ? $"Server={dbServer};Database={dbName};User Id={dbUser};Password={dbPassword};Encrypt=True;TrustServerCertificate=True;MultipleActiveResultSets=True;" : null;
+builder.Services.AddDbContext<ApplicationDbContext>(options =>
+    options.UseSqlServer(connectionString));
 
+// JWT Configuration
+var jwtSecretKey = Environment.GetEnvironmentVariable("JWT_SECRET_KEY") 
+    ?? builder.Configuration["JwtSettings:SecretKey"]!;
 
-builder.Services.AddDbContext<AppDbContext>(options =>
-        options.UseSqlServer(connectionString));
-
-builder.Services.AddIdentity<User, IdentityRole>(options =>
+builder.Services.Configure<JwtSettings>(options =>
 {
-    options.Password.RequireDigit = true;
-    options.Password.RequiredLength = 8;
-    options.User.RequireUniqueEmail = true;
-    options.Lockout.DefaultLockoutTimeSpan = TimeSpan.FromMinutes(15);
-    options.Lockout.MaxFailedAccessAttempts = 5;
-    options.Lockout.AllowedForNewUsers = true;
-})
-.AddEntityFrameworkStores<AppDbContext>()
-.AddDefaultTokenProviders();
+    options.SecretKey = jwtSecretKey;
+    options.Issuer = Environment.GetEnvironmentVariable("JWT_ISSUER") 
+        ?? builder.Configuration["JwtSettings:Issuer"]!;
+    options.Audience = Environment.GetEnvironmentVariable("JWT_AUDIENCE") 
+        ?? builder.Configuration["JwtSettings:Audience"]!;
+    options.AccessTokenExpirationMinutes = int.Parse(
+        Environment.GetEnvironmentVariable("JWT_ACCESS_TOKEN_MINUTES") 
+        ?? builder.Configuration["JwtSettings:AccessTokenExpirationMinutes"]!);
+    options.RefreshTokenExpirationDays = int.Parse(
+        Environment.GetEnvironmentVariable("JWT_REFRESH_TOKEN_DAYS") 
+        ?? builder.Configuration["JwtSettings:RefreshTokenExpirationDays"]!);
+});
 
-var jwtKey = Environment.GetEnvironmentVariable("JWT_KEY")
-            ?? builder.Configuration["Jwt:Key"];
+// Email Configuration
+builder.Services.Configure<EmailSettings>(options =>
+{
+    options.SmtpHost = Environment.GetEnvironmentVariable("SMTP_HOST") 
+        ?? builder.Configuration["EmailSettings:SmtpHost"]!;
+    options.SmtpPort = int.Parse(
+        Environment.GetEnvironmentVariable("SMTP_PORT") 
+        ?? builder.Configuration["EmailSettings:SmtpPort"]!);
+    options.SenderEmail = Environment.GetEnvironmentVariable("SMTP_SENDER_EMAIL") 
+        ?? builder.Configuration["EmailSettings:SenderEmail"]!;
+    options.SenderName = Environment.GetEnvironmentVariable("SMTP_SENDER_NAME") 
+        ?? builder.Configuration["EmailSettings:SenderName"]!;
+    options.Password = Environment.GetEnvironmentVariable("SMTP_PASSWORD") 
+        ?? builder.Configuration["EmailSettings:Password"]!;
+    options.EnableSsl = bool.Parse(
+        Environment.GetEnvironmentVariable("SMTP_ENABLE_SSL") 
+        ?? builder.Configuration["EmailSettings:EnableSsl"]!);
+});
 
+// Google OAuth Configuration
+builder.Services.Configure<GoogleAuthSettings>(options =>
+{
+    options.ClientId = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_ID") 
+        ?? builder.Configuration["GoogleAuth:ClientId"]!;
+    options.ClientSecret = Environment.GetEnvironmentVariable("GOOGLE_CLIENT_SECRET") 
+        ?? builder.Configuration["GoogleAuth:ClientSecret"]!;
+});
+
+// OTP Configuration
+builder.Services.Configure<OtpSettings>(options =>
+{
+    options.ExpirationMinutes = int.Parse(
+        Environment.GetEnvironmentVariable("OTP_EXPIRATION_MINUTES") 
+        ?? builder.Configuration["OtpSettings:ExpirationMinutes"]!);
+    options.Length = int.Parse(
+        Environment.GetEnvironmentVariable("OTP_LENGTH") 
+        ?? builder.Configuration["OtpSettings:Length"]!);
+    options.MaxResendAttempts = int.Parse(
+        Environment.GetEnvironmentVariable("OTP_MAX_RESEND_ATTEMPTS") 
+        ?? builder.Configuration["OtpSettings:MaxResendAttempts"]!);
+    options.ResendCooldownSeconds = int.Parse(
+        Environment.GetEnvironmentVariable("OTP_RESEND_COOLDOWN_SECONDS") 
+        ?? builder.Configuration["OtpSettings:ResendCooldownSeconds"]!);
+});
+
+// Memory Cache (for rate limiting)
+builder.Services.AddMemoryCache();
+
+// JWT Authentication
 builder.Services.AddAuthentication(options =>
 {
     options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
@@ -62,128 +96,70 @@ builder.Services.AddAuthentication(options =>
 {
     options.TokenValidationParameters = new TokenValidationParameters
     {
-        ValidateIssuer = true,
-        ValidateAudience = true,
-        ValidateLifetime = true,
         ValidateIssuerSigningKey = true,
-        ValidIssuer = builder.Configuration["Jwt:Issuer"],
-        ValidAudience = builder.Configuration["Jwt:Audience"],
-        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey)),
+        IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtSecretKey)),
+        ValidateIssuer = true,
+        ValidIssuer = Environment.GetEnvironmentVariable("JWT_ISSUER") 
+            ?? builder.Configuration["JwtSettings:Issuer"],
+        ValidateAudience = true,
+        ValidAudience = Environment.GetEnvironmentVariable("JWT_AUDIENCE") 
+            ?? builder.Configuration["JwtSettings:Audience"],
+        ValidateLifetime = true,
         ClockSkew = TimeSpan.Zero
     };
-
-    options.Events = new JwtBearerEvents
-    {
-        OnAuthenticationFailed = context =>
-        {
-            return Task.CompletedTask;
-        },
-        OnTokenValidated = context =>
-        {
-            return Task.CompletedTask;
-        }
-    };
 });
+
+builder.Services.AddAuthorization();
+
+// CORS
+var corsOrigins = Environment.GetEnvironmentVariable("CORS_ORIGINS")?.Split(',') 
+    ?? new[] { "http://localhost:3000", "http://localhost:5173" };
 
 builder.Services.AddCors(options =>
 {
-    options.AddPolicy("AllowReactApp", policy =>
+    options.AddPolicy("AllowFrontend", policy =>
     {
-        var allowedOrigins = builder.Configuration
-            .GetSection("AllowedOrigins")
-            .Get<string[]>() ?? new[] {
-            "http://localhost:5173",
-            "http://localhost:3000",
-            "https://gallery.2ao1.space",
-            "https://www.gallery.2ao1.space",
-            "https://gallery-eight-sigma.vercel.app",
-            "https://gallery-2ao1.runasp.net"
-        };
-
-        policy.WithOrigins(allowedOrigins)
-              .AllowAnyHeader()
+        policy.WithOrigins(corsOrigins)
               .AllowAnyMethod()
-              .AllowCredentials()
-              .SetIsOriginAllowedToAllowWildcardSubdomains();
+              .AllowAnyHeader()
+              .AllowCredentials();
     });
 });
 
-builder.Services.AddRateLimiter(options =>
-{
-    options.AddFixedWindowLimiter("refresh", opt =>
-    {
-        opt.Window = TimeSpan.FromMinutes(15);
-        opt.PermitLimit = 3;
-        opt.QueueLimit = 0;
-    });
+// Services
+builder.Services.AddScoped<JwtService>();
+builder.Services.AddScoped<IEmailService, EmailService>();
+builder.Services.AddScoped<IOtpService, OtpService>();
+builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IPasswordService, PasswordService>();
+builder.Services.AddScoped<IGoogleAuthService, GoogleAuthService>();
+builder.Services.AddScoped<IEmailChangeService, EmailChangeService>();
+builder.Services.AddScoped<IAccountManagementService, AccountManagementService>();
 
-    options.AddFixedWindowLimiter("auth", opt =>
-    {
-        opt.Window = TimeSpan.FromMinutes(5);
-        opt.PermitLimit = 5;
-        opt.QueueLimit = 0;
-    });
-
-    options.AddFixedWindowLimiter("general", opt =>
-    {
-        opt.Window = TimeSpan.FromMinutes(1);
-        opt.PermitLimit = 60;
-        opt.QueueLimit = 0;
-    });
-
-    options.OnRejected = async (context, token) =>
-    {
-        context.HttpContext.Response.StatusCode = 429;
-        
-
-        await context.HttpContext.Response.WriteAsJsonAsync(new
-        {
-            success = false,
-            message = "Too many requests. Please try again later.",
-            retryAfter = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var retryAfter)
-                ? (double?)retryAfter.TotalSeconds
-                : null
-        }, cancellationToken: token);
-    };
-});
-
-builder.Services.AddScoped<TokenService>();
-builder.Services.AddScoped<EmailService>();
-builder.Services.AddScoped<CloudinaryService>();
-
-if (!builder.Environment.IsEnvironment("Migration"))
-{
-    builder.Services.AddHostedService<TokenCleanupService>();
-}
-
+// Controllers
 builder.Services.AddControllers();
-builder.Services.AddHttpClient();
+
+// Swagger
 builder.Services.AddEndpointsApiExplorer();
-builder.Services.AddSwaggerGen(options =>
+builder.Services.AddSwaggerGen(c =>
 {
-    options.SwaggerDoc("v1", new OpenApiInfo
-    {
-        Title = "Gallery API",
+    c.SwaggerDoc("v1", new OpenApiInfo 
+    { 
+        Title = "Pinterest Clone API", 
         Version = "v1",
-        Description = "API for Gallery - Social Media Platform",
-        Contact = new OpenApiContact
-        {
-            Name = "2ao1",
-            Email = "2ao1.space@gmail.com"
-        }
+        Description = "Complete Authentication & Authorization API with Advanced Features"
     });
     
-    options.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
+    c.AddSecurityDefinition("Bearer", new OpenApiSecurityScheme
     {
+        Description = "JWT Authorization header using Bearer scheme. Example: 'Bearer {token}'",
         Name = "Authorization",
-        Type = SecuritySchemeType.Http,
-        Scheme = "Bearer",
-        BearerFormat = "JWT",
         In = ParameterLocation.Header,
-        Description = "Enter JWT Token: Bearer {token}"
+        Type = SecuritySchemeType.ApiKey,
+        Scheme = "Bearer"
     });
-
-    options.AddSecurityRequirement(new OpenApiSecurityRequirement
+    
+    c.AddSecurityRequirement(new OpenApiSecurityRequirement
     {
         {
             new OpenApiSecurityScheme
@@ -201,41 +177,19 @@ builder.Services.AddSwaggerGen(options =>
 
 var app = builder.Build();
 
-
-try
-{
-    using var scope = app.Services.CreateScope();
-    var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    var canConnect = await dbContext.Database.CanConnectAsync();
-    
-    if (!canConnect)
-    {
-    }
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"{ex.Message}");
-}
-
-app.UseMiddleware<GlobalExceptionMiddleware>();
-
-app.UseDeveloperExceptionPage();
-
+// Middleware
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
-    app.UseSwaggerUI(c =>
-    {
-        c.SwaggerEndpoint("/swagger/v1/swagger.json", "Gallery API V1");
-        c.RoutePrefix = "swagger";
-    });
+    app.UseSwaggerUI();
 }
 
 app.UseHttpsRedirection();
 
-app.UseCors("AllowReactApp");
+app.UseCors("AllowFrontend");
 
-app.UseRateLimiter();
+// Custom Rate Limiting Middleware
+app.UseMiddleware<RateLimitingMiddleware>();
 
 app.UseAuthentication();
 app.UseAuthorization();

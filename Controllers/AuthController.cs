@@ -1,337 +1,396 @@
-using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Gallery.Models.Entities;
-using Gallery.Models.DTPs;
+using Gallery.DTOs;
+using Gallery.Middleware;
 using Gallery.Services;
-using Microsoft.AspNetCore.RateLimiting;
+using System.Security.Claims;
 
 namespace Gallery.Controllers
 {
     [ApiController]
-    [Route("[controller]")]
+    [Route("auth")]
     public class AuthController : ControllerBase
+{
+    private readonly IAuthService _authService;
+    private readonly IPasswordService _passwordService;
+    private readonly ILogger<AuthController> _logger;
+    
+    public AuthController(
+        IAuthService authService,
+        IPasswordService passwordService,
+        ILogger<AuthController> logger)
     {
-        private readonly UserManager<User> _userManager;
-        private readonly SignInManager<User> _signInManager;
-        private readonly TokenService _tokenService;
-        private readonly EmailService _emailService;
-
-        public AuthController(
-            UserManager<User> userManager,
-            SignInManager<User> signInManager,
-            TokenService tokenService,
-            EmailService emailService
-        )
+        _authService = authService;
+        _passwordService = passwordService;
+        _logger = logger;
+    }
+    
+    // POST /api/auth/register
+    // Max 3 registrations per hour per IP
+    [HttpPost("register")]
+    [RateLimit(3, 60)]
+    public async Task<IActionResult> Register([FromBody] RegisterRequest request)
+    {
+        try
         {
-            _userManager = userManager;
-            _signInManager = signInManager;
-            _tokenService = tokenService;
-            _emailService = emailService;
+            var ipAddress = GetIpAddress();
+            var result = await _authService.RegisterAsync(request, ipAddress);
+            
+            if (!result.Success)
+            {
+                return BadRequest(result);
+            }
+            
+            return Ok(result);
         }
-
-        private async Task<(string accessToken, string refreshToken)> GenerateAndSaveTokens(User user)
+        catch (Exception ex)
         {
-            var accessToken = _tokenService.GenerateAccessToken(user);
-
-            var refreshToken = _tokenService.GenerateRefreshToken();
-
-            user.RefreshToken = refreshToken;
-            user.RefreshTokenExpiry = DateTime.UtcNow.AddDays(7);
-            await _userManager.UpdateAsync(user);
-
-            Response.Cookies.Append("refreshToken", refreshToken, new CookieOptions
-            {
-                HttpOnly = true,             
-                Secure = true,              
-                SameSite = SameSiteMode.None,
-                Expires = DateTimeOffset.UtcNow.AddDays(7)
-            });
-
-            return (accessToken, refreshToken);
-        }
-
-        [HttpPost("register")]
-        public async Task<ActionResult<AuthResponseDto>> Register(RegisterDto dto)
-        {
-            var existingUser = await _userManager.FindByEmailAsync(dto.Email);
-            if (existingUser != null)
-            {
-                return BadRequest(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Email already exists"
-                });
-            }
-
-            var user = new User
-            {
-                UserName = dto.Email,
-                Email = dto.Email,
-                FullName = dto.Name,
-                CreatedAt = DateTime.UtcNow
-            };
-
-            var result = await _userManager.CreateAsync(user, dto.Password);
-            if (!result.Succeeded)
-            {
-                return BadRequest(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = string.Join(", ", result.Errors.Select(e => e.Description))
-                });
-            }
-
-            var (accessToken, refreshToken) = await GenerateAndSaveTokens(user);
-
-            return Ok(new AuthResponseDto
-            {
-                Success = true,
-                Message = "Registration successful",
-                Token = accessToken,
-                RefreshToken = refreshToken,
-                User = new UserDto
-                {
-                    Id = user.Id,
-                    FullName = user.FullName,
-                    Email = user.Email!,
-                    ProfilePicture = user.ProfilePicture,
-                    CreatedAt = user.CreatedAt
-                }
-            });
-        }
-
-        [HttpPost("login")]
-        [EnableRateLimiting("auth")]
-        public async Task<ActionResult<AuthResponseDto>> Login(LoginDto dto)
-        {
-            var user = await _userManager.FindByEmailAsync(dto.Email);
-            if (user == null)
-            {
-                return Unauthorized(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Invalid email or password"
-                });
-            }
-
-            var result = await _signInManager.CheckPasswordSignInAsync(
-                user, dto.Password, lockoutOnFailure: false
-            );
-            if (!result.Succeeded)
-            {
-                return Unauthorized(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Invalid email or password"
-                });
-            }
-
-            user.LastLogin = DateTime.UtcNow;
-
-            var (accessToken, refreshToken) = await GenerateAndSaveTokens(user);
-
-            return Ok(new AuthResponseDto
-            {
-                Success = true,
-                Message = "Login successful",
-                Token = accessToken,
-                RefreshToken = refreshToken,
-                User = new UserDto
-                {
-                    Id = user.Id,
-                    FullName = user.FullName,
-                    Email = user.Email!,
-                    ProfilePicture = user.ProfilePicture,
-                    CreatedAt = user.CreatedAt
-                }
-            });
-        }
-
-        [HttpPost("refresh")]
-        [EnableRateLimiting("refresh")]
-        public async Task<ActionResult<AuthResponseDto>> RefreshToken()
-        {
-            var refreshToken = Request.Cookies["refreshToken"];
-            if (string.IsNullOrEmpty(refreshToken))
-            {
-                return Unauthorized(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Refresh token not found"
-                });
-            }
-
-            var users = _userManager.Users.Where(u => u.RefreshToken == refreshToken);
-            var user = users.FirstOrDefault();
-
-            if (user == null)
-            {
-                return Unauthorized(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Invalid refresh token"
-                });
-            }
-
-            if (user.RefreshTokenExpiry < DateTime.UtcNow)
-            {
-                return Unauthorized(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Refresh token expired"
-                });
-            }
-
-            var (accessToken, newRefreshToken) = await GenerateAndSaveTokens(user);
-
-            return Ok(new AuthResponseDto
-            {
-                Success = true,
-                Message = "Token refreshed successfully",
-                Token = accessToken,
-                RefreshToken = newRefreshToken 
-            });
-        }
-
-        [HttpPost("logout")]
-        public async Task<ActionResult<AuthResponseDto>> Logout()
-        {
-            var refreshToken = Request.Cookies["refreshToken"];
-            if (!string.IsNullOrEmpty(refreshToken))
-            {
-                var users = _userManager.Users.Where(u => u.RefreshToken == refreshToken);
-                var user = users.FirstOrDefault();
-                
-                if (user != null)
-                {
-                    user.RefreshToken = null;
-                    user.RefreshTokenExpiry = null;
-                    await _userManager.UpdateAsync(user);
-                }
-            }
-
-            Response.Cookies.Delete("refreshToken");
-
-            return Ok(new AuthResponseDto
-            {
-                Success = true,
-                Message = "Logged out successfully"
-            });
-        }
-
-        [HttpPost("forget-password")]
-        public async Task<ActionResult<AuthResponseDto>> ForgetPassword(ForgetPasswordDto dto)
-        {
-            var user = await _userManager.FindByEmailAsync(dto.Email);
-            if (user == null)
-            {
-                return Ok(new AuthResponseDto
-                {
-                    Success = true,
-                    Message = "If your email exists, you will receive an OTP"
-                });
-            }
-
-            var random = new Random();
-            var otp = random.Next(100000, 999999).ToString();
-
-            user.OtpCode = otp;
-            user.OtpExpiry = DateTime.UtcNow.AddMinutes(10);
-            await _userManager.UpdateAsync(user);
-
-            await _emailService.SendOtpEmailAsync(user.Email!, otp);
-
-            return Ok(new AuthResponseDto
-            {
-                Success = true,
-                Message = "OTP sent to your email"
-            });
-        }
-
-        [HttpPost("verify-otp")]
-        public async Task<ActionResult<AuthResponseDto>> VerifyOtp(VerifyOtpDto dto)
-        {
-            var user = await _userManager.FindByEmailAsync(dto.Email!);
-            if (user == null)
-            {
-                return BadRequest(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Invalid email"
-                });
-            }
-
-            if (user.OtpCode != dto.Otp)
-            {
-                return BadRequest(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Invalid OTP"
-                });
-            }
-
-            if (user.OtpExpiry < DateTime.UtcNow)
-            {
-                return BadRequest(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "OTP expired"
-                });
-            }
-
-            return Ok(new AuthResponseDto
-            {
-                Success = true,
-                Message = "OTP verified successfully"
-            });
-        }
-
-        [HttpPost("reset-password")]
-        public async Task<ActionResult<AuthResponseDto>> ResetPassword(ResetPasswordDto dto)
-        {
-            var user = await _userManager.FindByEmailAsync(dto.Email);
-            if (user == null)
-            {
-                return BadRequest(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Invalid request"
-                });
-            }
-
-            if (user.OtpCode != dto.Otp || user.OtpExpiry < DateTime.UtcNow)
-            {
-                return BadRequest(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = "Invalid or expired OTP"
-                });
-            }
-
-            var token = await _userManager.GeneratePasswordResetTokenAsync(user);
-            var result = await _userManager.ResetPasswordAsync(user, token, dto.NewPassword);
-
-            if (!result.Succeeded)
-            {
-                return BadRequest(new AuthResponseDto
-                {
-                    Success = false,
-                    Message = string.Join(", ", result.Errors.Select(e => e.Description))
-                });
-            }
-
-            user.OtpCode = null;
-            user.OtpExpiry = null;
-
-            var (accessToken, refreshToken) = await GenerateAndSaveTokens(user);
-
-            return Ok(new AuthResponseDto
-            {
-                Success = true,
-                Message = "Password reset successfully",
-                Token = accessToken,
-                RefreshToken = refreshToken
+            _logger.LogError(ex, "Registration error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred during registration" 
             });
         }
     }
+    
+    // POST /api/auth/verify-email
+    // Max 5 attempts per 10 minutes per IP
+    [HttpPost("verify-email")]
+    [RateLimit(5, 10)]
+    public async Task<IActionResult> VerifyEmail([FromBody] VerifyEmailRequest request)
+    {
+        try
+        {
+            var result = await _authService.VerifyEmailAsync(request);
+            
+            if (!result.Success)
+            {
+                return BadRequest(result);
+            }
+            
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Email verification error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred during verification" 
+            });
+        }
+    }
+    
+    // POST /api/auth/resend-otp
+    // Max 3 resends per 15 minutes per IP
+    [HttpPost("resend-otp")]
+    [RateLimit(3, 15)]
+    public async Task<IActionResult> ResendOtp([FromBody] ResendOtpRequest request)
+    {
+        try
+        {
+            var result = await _authService.ResendOtpAsync(request);
+            
+            if (!result.Success)
+            {
+                return BadRequest(result);
+            }
+            
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Resend OTP error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred while resending OTP" 
+            });
+        }
+    }
+    
+    // POST /api/auth/login
+    // Max 5 login attempts per 15 minutes per IP
+    [HttpPost("login")]
+    [RateLimit(5, 15)]
+    public async Task<IActionResult> Login([FromBody] LoginRequest request)
+    {
+        try
+        {
+            var ipAddress = GetIpAddress();
+            var userAgent = GetUserAgent();
+            
+            var result = await _authService.LoginAsync(request, ipAddress, userAgent);
+            
+            // Set refresh token in HttpOnly cookie
+            SetRefreshTokenCookie(result.AccessToken);
+            
+            return Ok(result);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new ApiResponse { Success = false, Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Login error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred during login" 
+            });
+        }
+    }
+    
+    // POST /api/auth/refresh-token
+    // Max 10 refreshes per 5 minutes
+    [HttpPost("refresh-token")]
+    [RateLimit(10, 5)]
+    public async Task<IActionResult> RefreshToken()
+    {
+        try
+        {
+            var refreshToken = Request.Cookies["refreshToken"];
+            
+            if (string.IsNullOrEmpty(refreshToken))
+            {
+                return Unauthorized(new ApiResponse 
+                { 
+                    Success = false, 
+                    Message = "Refresh token not found" 
+                });
+            }
+            
+            var ipAddress = GetIpAddress();
+            var userAgent = GetUserAgent();
+            
+            var result = await _authService.RefreshTokenAsync(refreshToken, ipAddress, userAgent);
+            
+            // Update refresh token cookie
+            SetRefreshTokenCookie(result.AccessToken);
+            
+            return Ok(result);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new ApiResponse { Success = false, Message = ex.Message });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Token refresh error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred during token refresh" 
+            });
+        }
+    }
+    
+    // POST /api/auth/logout
+    [Authorize]
+    [HttpPost("logout")]
+    public async Task<IActionResult> Logout()
+    {
+        try
+        {
+            var userId = GetUserId();
+            var refreshToken = Request.Cookies["refreshToken"];
+            
+            if (!string.IsNullOrEmpty(refreshToken))
+            {
+                await _authService.LogoutAsync(userId, refreshToken);
+            }
+            
+            // Clear refresh token cookie
+            Response.Cookies.Delete("refreshToken");
+            
+            return Ok(new ApiResponse { Success = true, Message = "Logged out successfully" });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Logout error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred during logout" 
+            });
+        }
+    }
+    
+    // GET /api/auth/me
+    // Max 30 requests per minute (authenticated users)
+    [Authorize]
+    [HttpGet("me")]
+    [RateLimit(30, 1, ByIpAddress = false)]
+    public async Task<IActionResult> GetCurrentUser()
+    {
+        try
+        {
+            var userId = GetUserId();
+            var user = await _authService.GetCurrentUserAsync(userId);
+            
+            return Ok(new ApiResponse 
+            { 
+                Success = true, 
+                Data = user 
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Get current user error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred while fetching user data" 
+            });
+        }
+    }
+    
+    // POST /api/auth/forgot-password
+    // Max 3 requests per 30 minutes per IP
+    [HttpPost("forgot-password")]
+    [RateLimit(3, 30)]
+    public async Task<IActionResult> ForgotPassword([FromBody] ForgotPasswordRequest request)
+    {
+        try
+        {
+            var result = await _passwordService.ForgotPasswordAsync(request);
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Forgot password error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred while processing your request" 
+            });
+        }
+    }
+    
+    // POST /api/auth/verify-reset-otp
+    // Max 5 attempts per 10 minutes per IP
+    [HttpPost("verify-reset-otp")]
+    [RateLimit(5, 10)]
+    public async Task<IActionResult> VerifyResetOtp([FromBody] VerifyResetOtpRequest request)
+    {
+        try
+        {
+            var result = await _passwordService.VerifyResetOtpAsync(request);
+            
+            if (!result.Success)
+            {
+                return BadRequest(result);
+            }
+            
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Verify reset OTP error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred during OTP verification" 
+            });
+        }
+    }
+    
+    // POST /api/auth/reset-password
+    // Max 3 resets per 30 minutes per IP
+    [HttpPost("reset-password")]
+    [RateLimit(3, 30)]
+    public async Task<IActionResult> ResetPassword([FromBody] ResetPasswordRequest request)
+    {
+        try
+        {
+            var ipAddress = GetIpAddress();
+            var result = await _passwordService.ResetPasswordAsync(request, ipAddress);
+            
+            if (!result.Success)
+            {
+                return BadRequest(result);
+            }
+            
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Reset password error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred while resetting password" 
+            });
+        }
+    }
+    
+    // POST /api/auth/change-password
+    // Max 5 changes per hour (authenticated users)
+    [Authorize]
+    [HttpPost("change-password")]
+    [RateLimit(5, 60, ByIpAddress = false)]
+    public async Task<IActionResult> ChangePassword([FromBody] ChangePasswordRequest request)
+    {
+        try
+        {
+            var userId = GetUserId();
+            var ipAddress = GetIpAddress();
+            
+            var result = await _passwordService.ChangePasswordAsync(userId, request, ipAddress);
+            
+            if (!result.Success)
+            {
+                return BadRequest(result);
+            }
+            
+            return Ok(result);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Change password error");
+            return StatusCode(500, new ApiResponse 
+            { 
+                Success = false, 
+                Message = "An error occurred while changing password" 
+            });
+        }
+    }
+    
+    // Helper Methods
+    private Guid GetUserId()
+    {
+        var userIdClaim = User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+        return Guid.Parse(userIdClaim ?? throw new UnauthorizedAccessException());
+    }
+    
+    private string GetIpAddress()
+    {
+        if (Request.Headers.TryGetValue("X-Forwarded-For", out var forwardedFor))
+        {
+            return forwardedFor.ToString().Split(',')[0].Trim();
+        }
+        
+        return HttpContext.Connection.RemoteIpAddress?.ToString() ?? "Unknown";
+    }
+    
+    private string GetUserAgent()
+    {
+        return Request.HttpContext.Request.Headers.UserAgent.ToString();
+    }
+    
+    private void SetRefreshTokenCookie(string token)
+    {
+        var cookieOptions = new CookieOptions
+        {
+            HttpOnly = true,
+            Secure = true,
+            SameSite = SameSiteMode.Strict,
+            Expires = DateTime.UtcNow.AddDays(7)
+        };
+        
+        Response.Cookies.Append("refreshToken", token, cookieOptions);
+    }
+}
 }
